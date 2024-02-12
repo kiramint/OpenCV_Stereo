@@ -1,9 +1,10 @@
 ﻿#include <iostream>
-#include <fstream>
 #include <exception>
 #include <chrono>
 #include <mutex>
+#include <fstream>
 #include <boost/thread.hpp>
+#include <boost/json.hpp>
 #include <opencv2/opencv.hpp>
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
@@ -12,7 +13,6 @@
 
 # ifdef _WIN32
 #include <Windows.h>
-// Only for Microsoft Windows
 #define DISABLE_MSMF	// Disable Microsoft Media Foundation feature on windows can let capture initialize faster
 
 namespace KiraCV
@@ -32,7 +32,7 @@ namespace KiraCV
 # endif
 
 #ifdef __LINUX__
-
+#include <linux.h>
 #endif
 
 #define RED     "\033[31m" <<
@@ -76,10 +76,52 @@ namespace KiraCV
 		cv::Mat R1, R2, P1, P2, Q;
 	};
 
-	class KiraUtilities
+	namespace KiraUtilities
 	{
-	public:
-		static bool saveCalibrateData(const CameraParamStereo& data, const std::string& path = "calibration_data.yaml") {
+		bool readSettings(boost::json::object& setting, std::string fileName = "settings.json")
+		{
+			try {
+				std::ifstream file(fileName);
+				std::string jsonRaw((std::istreambuf_iterator<char>(file)), (std::istreambuf_iterator<char>()));
+				setting = boost::json::parse(jsonRaw).as_object();
+				file.close();
+			}
+			catch (std::exception& ex)
+			{
+				throw ex;
+			}
+			return true;
+		}
+		bool saveSettings(boost::json::object& setting, std::string fileName = "settings.json")
+		{
+			try {
+				std::ofstream file(fileName,std::ios::out);
+				file << boost::json::serialize(setting);
+				file.close();
+			}
+			catch (std::exception& ex)
+			{
+				throw ex;
+			}
+			return true;
+		}
+		bool initSettings(std::string fileName = "settings.json")
+		{
+			boost::json::object setting;
+			setting["CameraDeviceNumber"] = 0;
+			setting["CameraResolutionWidth"] = 3840;
+			setting["CameraResolutionHeight"] = 1080;
+			setting["FPS"] = 30;
+			setting["WinSizeWidth"] = 640;
+			setting["WinSizeHeight"] = 480;
+			setting["UseBinaryThreshold"] = false;
+			setting["StereoBM_NumDisparities"] = 16;
+			setting["StereoBM_BlockSize"] = 6;
+			setting["StereoBM_UniquenessRatio"] = 3;
+			setting["StereoBM_PreFilterCap"] = 16;
+			return saveSettings(setting);
+		}
+		bool saveCalibrateData(const CameraParamStereo& data, const std::string& path = "calibration_data.yaml") {
 			try {
 				cv::FileStorage file(path, cv::FileStorage::WRITE);
 
@@ -128,7 +170,7 @@ namespace KiraCV
 			}
 			return false;
 		}
-		static std::pair<bool, CameraParamStereo> readCalibrateData(const std::string& path = "calibration_data.yaml") {
+		std::pair<bool, CameraParamStereo> readCalibrateData(const std::string& path = "calibration_data.yaml") {
 			CameraParamStereo data;
 			try
 			{
@@ -179,7 +221,8 @@ namespace KiraCV
 			}
 			return std::make_pair(false, data);
 		}
-		static void showCalibrateData(CameraParamStereo data)
+
+		void showCalibrateData(CameraParamStereo data)
 		{
 			// Print Info
 			std::cout << HIGHLIGHT "\nResult left: ##### \n" CLRST \
@@ -215,95 +258,96 @@ namespace KiraCV
 		}
 	};
 
-	void callCaptureAsyncLoop(CaptureAsync ca);
-	class CaptureAsync
-	{
-	public:
-		CaptureAsync(const int& _cameraDeviceNo, const std::function<int(int)>& _waitKeyCallback)
-		{
-			cameraDeviceNo = _cameraDeviceNo;
-			waitKeyCallback = _waitKeyCallback;
-		}
-		~CaptureAsync()
-		{
-			if(KiraCV::isThreadAlive(*captureThread))
-			captureThread->interrupt();
-			if(captureThread != nullptr)
-			{
-				delete captureThread;
-			}
-		}
-		void start()
-		{
-			capture.open(cameraDeviceNo);
-			// Camera trim
-			capture.set(cv::CAP_PROP_FRAME_WIDTH, 3840);
-			capture.set(cv::CAP_PROP_FRAME_HEIGHT, 1080);
-			capture.set(cv::CAP_PROP_FPS, 30);
-			capture.set(cv::CAP_PROP_FOURCC, cv::CAP_OPENCV_MJPEG);
-			captureThread = new boost::thread(asyncCaptureLoop);
-		}
-		void asyncCaptureLoop()
-		{
-			try
-			{
-				cv::namedWindow("Async Capture", cv::WINDOW_GUI_EXPANDED);
-				cv::resizeWindow("Async Capture", 640, 480);
-				auto badCaptureTime = 0;
-				while (true)
-				{
-					lock.lock();
-					auto result = capture.read(frame);
-					lock.unlock();
+	boost::json::object setting;
 
-					if (!result)
+	namespace Async	// Constructing...
+	{
+		class CaptureAsyncClass
+		{
+		public:
+			CaptureAsyncClass(const int& _cameraDeviceNo, const std::function<int(int)>& _waitKeyCallback)
+			{
+				cameraDeviceNo = _cameraDeviceNo;
+				waitKeyCallback = _waitKeyCallback;
+			}
+			~CaptureAsyncClass()
+			{
+				if (KiraCV::isThreadAlive(*captureThread))
+					captureThread->interrupt();
+				if (captureThread != nullptr)
+				{
+					delete captureThread;
+				}
+			}
+			void asyncCaptureLoop()
+			{
+				try
+				{
+					capture.open(cameraDeviceNo);
+					// Camera trim
+					capture.set(cv::CAP_PROP_FRAME_WIDTH, setting["CameraResolutionWidth"].as_int64());
+					capture.set(cv::CAP_PROP_FRAME_HEIGHT, setting["CameraResolutionHeight"].as_int64());
+					capture.set(cv::CAP_PROP_FRAME_HEIGHT, setting["CameraResolutionHeight"].as_int64());
+					capture.set(cv::CAP_PROP_FPS, setting["FPS"].as_int64());
+					capture.set(cv::CAP_PROP_FOURCC, cv::CAP_OPENCV_MJPEG);
+					cv::namedWindow("Async Capture", cv::WINDOW_GUI_EXPANDED);
+					cv::resizeWindow("Async Capture", setting["WinSizeWidth"].as_int64(), setting["WinSizeHeight"].as_int64());
+					auto badCaptureTime = 0;
+					while (true)
 					{
-						badCaptureTime++;
-						std::cerr << HIGHLIGHT "Bad frame read, [ " << badCaptureTime << " ]\n" CLRST;
-						if (badCaptureTime >= 5)
+						lock.lock();
+						auto result = capture.read(frame);
+						lock.unlock();
+
+						if (!result)
 						{
-							std::cerr << HIGHLIGHT "Bad frame at the limit, have you lost your USB connection?\n" CLRST;
-							return;
+							badCaptureTime++;
+							std::cerr << HIGHLIGHT "Bad frame read, [ " << badCaptureTime << " ]\n" CLRST;
+							if (badCaptureTime >= 5)
+							{
+								std::cerr << HIGHLIGHT "Bad frame at the limit, have you lost your USB connection?\n" CLRST;
+								return;
+							}
+							continue;
 						}
-						continue;
+
+						cv::imshow("Async Capture", frame);
+
+						waitKeyCallback(cv::waitKey(1));
 					}
-
-					cv::imshow("Async Capture", frame);
-
-					waitKeyCallback(cv::waitKey(1));
 				}
-			}
-			catch (boost::thread_interrupted&)
-			{
-				cv::destroyWindow("Async Capture");
-				if (capture.isOpened())
+				catch (boost::thread_interrupted&)
 				{
-					capture.release();
+					cv::destroyWindow("Async Capture");
+					if (capture.isOpened())
+					{
+						capture.release();
+					}
 				}
-			}
-			catch (std::exception& ex)
-			{
-				std::cout << HIGHLIGHT "Unknown exception caught in Async Capture\n" CLRST;
-				std::cout << HIGHLIGHT ex.what() << "\n" CLRST;
-				cv::destroyWindow("Async Capture");
-				if (capture.isOpened())
+				catch (std::exception& ex)
 				{
-					capture.release();
+					std::cout << HIGHLIGHT "Unknown exception caught in Async Capture\n" CLRST;
+					std::cout << HIGHLIGHT ex.what() << "\n" CLRST;
+					cv::destroyWindow("Async Capture");
+					if (capture.isOpened())
+					{
+						capture.release();
+					}
 				}
 			}
-		}
-	private:
-		int cameraDeviceNo;
-		cv::VideoCapture capture;
-		cv::Mat frame;
-		boost::mutex lock;
-		boost::thread* captureThread = nullptr;
-		std::function<int(int)>waitKeyCallback;
-		
-	};
-	void callCaptureAsyncLoop(CaptureAsync ca)
-	{
-		ca.asyncCaptureLoop();
+		private:
+			int cameraDeviceNo;
+			cv::VideoCapture capture;
+			cv::Mat frame;
+			boost::mutex lock;
+			boost::thread* captureThread = nullptr;
+			std::function<int(int)>waitKeyCallback;
+		};
+
+		/* CaptureAsyncClass captureAsync(const int& _cameraDeviceNo, const std::function<int(int)>& _waitKeyCallback)
+		{
+
+		} */
 	}
 
 	// Single camera calibration
@@ -395,19 +439,19 @@ namespace KiraCV
 			
 			capture.open(cameraDeviceNo);
 			// Camera trim
-			capture.set(cv::CAP_PROP_FRAME_WIDTH, 3840);
-			capture.set(cv::CAP_PROP_FRAME_HEIGHT, 1080);
-			capture.set(cv::CAP_PROP_FPS, 30);
+			capture.set(cv::CAP_PROP_FRAME_WIDTH, setting["CameraResolutionWidth"].as_int64());
+			capture.set(cv::CAP_PROP_FRAME_HEIGHT, setting["CameraResolutionHeight"].as_int64());
+			capture.set(cv::CAP_PROP_FPS, setting["FPS"].as_int64());
 			capture.set(cv::CAP_PROP_FOURCC, cv::CAP_OPENCV_MJPEG);
 			// Windows trim
 			cv::namedWindow("left", cv::WINDOW_GUI_EXPANDED);
 			cv::namedWindow("right", cv::WINDOW_GUI_EXPANDED);
-			cv::resizeWindow("left", 640, 480);
-			cv::resizeWindow("right", 640, 480);
+			cv::resizeWindow("left", setting["WinSizeWidth"].as_int64(), setting["WinSizeHeight"].as_int64());
+			cv::resizeWindow("right", setting["WinSizeWidth"].as_int64(), setting["WinSizeHeight"].as_int64());
 			cv::namedWindow("left_valid", cv::WINDOW_NORMAL);
 			cv::namedWindow("right_valid", cv::WINDOW_NORMAL);
-			cv::resizeWindow("left_valid", 640, 480);
-			cv::resizeWindow("right_valid", 640, 480);
+			cv::resizeWindow("left_valid", setting["WinSizeWidth"].as_int64(), setting["WinSizeHeight"].as_int64());
+			cv::resizeWindow("right_valid", setting["WinSizeWidth"].as_int64(), setting["WinSizeHeight"].as_int64());
 
 			CameraCalibration leftCali(boardSize.height, boardSize.width, squareSize);
 			CameraCalibration rightCali(boardSize.height, boardSize.width, squareSize);
@@ -606,6 +650,10 @@ namespace KiraCV
 		{
 			param = _param;
 			cameraDeviceNo = _cameraDeviceNo;
+			numDisparities = setting["StereoBM_NumDisparities"].as_int64();
+			blockSize = setting["StereoBM_BlockSize"].as_int64();
+			uniquenessRatio = setting["StereoBM_UniquenessRatio"].as_int64();
+			preFilterCap = setting["StereoBM_PreFilterCap"].as_int64();
 		}
 
 		~StereoReconstruction()
@@ -629,16 +677,16 @@ namespace KiraCV
 			// Camera trim
 			capture.set(cv::CAP_PROP_FRAME_WIDTH, 3840);
 			capture.set(cv::CAP_PROP_FRAME_HEIGHT, 1080);
-			capture.set(cv::CAP_PROP_FPS, 30);
+			capture.set(cv::CAP_PROP_FPS, setting["FPS"].as_int64());
 			capture.set(cv::CAP_PROP_FOURCC, cv::CAP_OPENCV_MJPEG);
 			cv::namedWindow("left", cv::WINDOW_GUI_NORMAL);
 			cv::namedWindow("right", cv::WINDOW_GUI_EXPANDED);
-			cv::resizeWindow("left", 640, 480);
-			cv::resizeWindow("right", 640, 480);
+			cv::resizeWindow("left", setting["WinSizeWidth"].as_int64(), setting["WinSizeHeight"].as_int64());
+			cv::resizeWindow("right", setting["WinSizeWidth"].as_int64(), setting["WinSizeHeight"].as_int64());
 			cv::namedWindow("disparity", cv::WINDOW_NORMAL);
-			cv::resizeWindow("disparity", 640, 480);
+			cv::resizeWindow("disparity", setting["WinSizeWidth"].as_int64(), setting["WinSizeHeight"].as_int64());
 			cv::namedWindow("param", cv::WINDOW_NORMAL);
-			cv::resizeWindow("param", 640, 480);
+			cv::resizeWindow("param", setting["WinSizeWidth"].as_int64(), setting["WinSizeHeight"].as_int64());
 
 			int badCaptureTime = 0;
 			cv::Mat frame;
@@ -694,6 +742,10 @@ namespace KiraCV
 				{
 					capture.release();
 					cv::destroyAllWindows();
+					setting["StereoBM_NumDisparities"] = numDisparities;
+					setting["StereoBM_BlockSize"] = blockSize;
+					setting["StereoBM_UniquenessRatio"] = uniquenessRatio;
+					setting["StereoBM_PreFilterCap"] = preFilterCap;
 					return;
 				}
 			}
@@ -722,10 +774,10 @@ namespace KiraCV
 	private:
 		CameraParamStereo param;
 		int cameraDeviceNo;
-		int numDisparities = 0;
-		int blockSize = 0;
-		int uniquenessRatio = 0;
-		int PreFilterCap = 15;
+		int numDisparities = 16;
+		int blockSize = 6;
+		int uniquenessRatio = 3;
+		int preFilterCap = 16;
 		cv::Rect ROI1, ROI2;
 		cv::Mat mapLx, mapLy, mapRx, mapRy,_3dImage;
 		bool rectify = false;
@@ -747,13 +799,29 @@ namespace KiraCV
 int main()
 {
 	std::cout << HIGHLIGHT "Kira OpenCV Stereo Tools\n" CLRST;
+	// Load settings
+	std::string settingFileName = "settings.json";
+	std::ifstream check(settingFileName);
+	if(check.good())
+	{
+		check.close();
+	}
+	else
+	{
+		check.close();
+		KiraCV::KiraUtilities::initSettings(settingFileName);
+	}
+	KiraCV::KiraUtilities::readSettings(KiraCV::setting, settingFileName);
+
 	while (true)
 	{
 		std::cout << HIGHLIGHT R"delemeter(Options:
 1. Stereo calibration.
 2. StereoBM reconstruction.
+3. StereoSGBM reconstruction.
 4. Show calibration data.
-5. Async capture.
+5. Save and Quit
+6. Quit
 Enter the number: )delemeter" CLRST;
 		int opts;
 		std::cin >> opts;
@@ -824,7 +892,7 @@ Enter the number: )delemeter" CLRST;
 			{
 				squareSize = 28.5f;
 			}
-			KiraCV::InteractiveCameraCalibration acc(boardSize.height, boardSize.width, squareSize);
+			KiraCV::InteractiveCameraCalibration acc(boardSize.height, boardSize.width, squareSize, KiraCV::setting["CameraDeviceNumber"].as_int64(), KiraCV::setting["UseBinaryThreshold"].as_bool());
 			KiraCV::CameraParamStereo cameraParamStereo;
 			acc.startCalibration(cameraParamStereo);
 			acc.saveCalibrationResult();
@@ -834,7 +902,7 @@ Enter the number: )delemeter" CLRST;
 		{
 			std::cout << "Booting...\n";
 			KiraCV::CameraParamStereo param = KiraCV::KiraUtilities::readCalibrateData("calibration_data.yaml").second;
-			KiraCV::StereoReconstruction srs(param);
+			KiraCV::StereoReconstruction srs(param, KiraCV::setting["CameraDeviceNumber"].as_int64());
 			srs.InteractiveReconstruction();
 		}
 		break;
@@ -845,12 +913,25 @@ Enter the number: )delemeter" CLRST;
 		break;
 		case 5:
 		{
-			KiraCV::CaptureAsync ca(0,[](int key)->int{
-				std::cout << HIGHLIGHT "Keyboard action [ " << (char)key << " ] received. \n" CLRST;
-				return key;
-			});
-			ca.start();
+			KiraCV::KiraUtilities::saveSettings(KiraCV::setting, settingFileName);
+			return 0;
 			break;
+		}
+		case 6:
+		{
+			std::cout << HIGHLIGHT "Discard changes? (No)" CLRST;
+			std::string input;
+			std::cin.sync();
+			std::getline(std::cin, input);
+			std::getline(std::cin, input);
+			if (input == "yes" || input == "Yes" || input == "Y" || input == "y")
+			{
+				return 0;
+			}
+			else
+			{
+				continue;
+			}
 		}
 		default:
 		{
@@ -859,6 +940,4 @@ Enter the number: )delemeter" CLRST;
 		break;
 		}
 	}
-
-	return 0;
 }
