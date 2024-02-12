@@ -14,21 +14,6 @@
 # ifdef _WIN32
 #include <Windows.h>
 #define DISABLE_MSMF	// Disable Microsoft Media Foundation feature on windows can let capture initialize faster
-
-namespace KiraCV
-{
-	bool isThreadAlive(boost::thread& detect)
-	{
-		HANDLE hThread = detect.native_handle();
-		DWORD exitCode;
-		if (GetExitCodeThread(hThread, &exitCode) && exitCode == STILL_ACTIVE)
-		{
-			return true;
-		}
-		return false;
-	}
-};
-
 # endif
 
 #ifdef __LINUX__
@@ -52,19 +37,19 @@ namespace KiraCV
 
 	struct CamaraParam
 	{
-		bool checkRange;
+		bool checkRange = false;
 		cv::Mat cameraMatrix;
 		cv::Mat distCoeffs;
 		cv::Mat rotationVectors;
 		cv::Mat translationVectors;
-		double rms;
+		double rms = 0;
 	};
 
 	struct CameraParamStereo
 	{
 		CamaraParam left;
 		CamaraParam right;
-		double rms;
+		double rms = 0;
 		cv::Mat cameraMatrixLeft;
 		cv::Mat distCoeffsLeft;
 		cv::Mat cameraMatrixRight;
@@ -95,7 +80,7 @@ namespace KiraCV
 		bool saveSettings(boost::json::object& setting, std::string fileName = "settings.json")
 		{
 			try {
-				std::ofstream file(fileName,std::ios::out);
+				std::ofstream file(fileName, std::ios::out);
 				file << boost::json::serialize(setting);
 				file.close();
 			}
@@ -119,6 +104,8 @@ namespace KiraCV
 			setting["StereoBM_BlockSize"] = 6;
 			setting["StereoBM_UniquenessRatio"] = 3;
 			setting["StereoBM_PreFilterCap"] = 16;
+			setting["Toggle_MSMF"] = true;
+			setting["Toggle_RT_StereoBM"] = true;
 			return saveSettings(setting);
 		}
 		bool saveCalibrateData(const CameraParamStereo& data, const std::string& path = "calibration_data.yaml") {
@@ -224,7 +211,6 @@ namespace KiraCV
 
 		void showCalibrateData(CameraParamStereo data)
 		{
-			// Print Info
 			std::cout << HIGHLIGHT "\nResult left: ##### \n" CLRST \
 				<< HIGHLIGHT "Check Range: \n" CLRST << data.left.checkRange << "\n"\
 				<< HIGHLIGHT "cameraMatrix: \n" CLRST << data.left.cameraMatrix << "\n"\
@@ -260,97 +246,7 @@ namespace KiraCV
 
 	boost::json::object setting;
 
-	namespace Async	// Constructing...
-	{
-		class CaptureAsyncClass
-		{
-		public:
-			CaptureAsyncClass(const int& _cameraDeviceNo, const std::function<int(int)>& _waitKeyCallback)
-			{
-				cameraDeviceNo = _cameraDeviceNo;
-				waitKeyCallback = _waitKeyCallback;
-			}
-			~CaptureAsyncClass()
-			{
-				if (KiraCV::isThreadAlive(*captureThread))
-					captureThread->interrupt();
-				if (captureThread != nullptr)
-				{
-					delete captureThread;
-				}
-			}
-			void asyncCaptureLoop()
-			{
-				try
-				{
-					capture.open(cameraDeviceNo);
-					// Camera trim
-					capture.set(cv::CAP_PROP_FRAME_WIDTH, setting["CameraResolutionWidth"].as_int64());
-					capture.set(cv::CAP_PROP_FRAME_HEIGHT, setting["CameraResolutionHeight"].as_int64());
-					capture.set(cv::CAP_PROP_FRAME_HEIGHT, setting["CameraResolutionHeight"].as_int64());
-					capture.set(cv::CAP_PROP_FPS, setting["FPS"].as_int64());
-					capture.set(cv::CAP_PROP_FOURCC, cv::CAP_OPENCV_MJPEG);
-					cv::namedWindow("Async Capture", cv::WINDOW_GUI_EXPANDED);
-					cv::resizeWindow("Async Capture", setting["WinSizeWidth"].as_int64(), setting["WinSizeHeight"].as_int64());
-					auto badCaptureTime = 0;
-					while (true)
-					{
-						lock.lock();
-						auto result = capture.read(frame);
-						lock.unlock();
-
-						if (!result)
-						{
-							badCaptureTime++;
-							std::cerr << HIGHLIGHT "Bad frame read, [ " << badCaptureTime << " ]\n" CLRST;
-							if (badCaptureTime >= 5)
-							{
-								std::cerr << HIGHLIGHT "Bad frame at the limit, have you lost your USB connection?\n" CLRST;
-								return;
-							}
-							continue;
-						}
-
-						cv::imshow("Async Capture", frame);
-
-						waitKeyCallback(cv::waitKey(1));
-					}
-				}
-				catch (boost::thread_interrupted&)
-				{
-					cv::destroyWindow("Async Capture");
-					if (capture.isOpened())
-					{
-						capture.release();
-					}
-				}
-				catch (std::exception& ex)
-				{
-					std::cout << HIGHLIGHT "Unknown exception caught in Async Capture\n" CLRST;
-					std::cout << HIGHLIGHT ex.what() << "\n" CLRST;
-					cv::destroyWindow("Async Capture");
-					if (capture.isOpened())
-					{
-						capture.release();
-					}
-				}
-			}
-		private:
-			int cameraDeviceNo;
-			cv::VideoCapture capture;
-			cv::Mat frame;
-			boost::mutex lock;
-			boost::thread* captureThread = nullptr;
-			std::function<int(int)>waitKeyCallback;
-		};
-
-		/* CaptureAsyncClass captureAsync(const int& _cameraDeviceNo, const std::function<int(int)>& _waitKeyCallback)
-		{
-
-		} */
-	}
-
-	// Single camera calibration
+	// Single calibration
 	class CameraCalibration
 	{
 	public:
@@ -358,19 +254,18 @@ namespace KiraCV
 		{
 			boardSize.height = _chessBoardHeight;
 			boardSize.width = _chessBoardWidth;
-			squareSize = _squareSize; //Meter
+			squareSize = _squareSize; // meter
 		}
-		std::tuple<bool, std::vector<cv::Point2f>>findChessBoard(cv::Mat frame)
+		std::tuple<bool, std::vector<cv::Point2f>>findCorners(cv::Mat frame)
 		{
-			// Find corners
 			std::vector<cv::Point2f> corners;
-			bool result = cv::findChessboardCorners(frame, boardSize, corners, cv::CALIB_CB_ADAPTIVE_THRESH /*| cv::CALIB_CB_FAST_CHECK */ | cv::CALIB_CB_NORMALIZE_IMAGE | cv::CALIB_CB_FILTER_QUADS);
+			bool result = cv::findChessboardCorners(frame, boardSize, corners, cv::CALIB_CB_ADAPTIVE_THRESH /*| cv::CALIB_CB_FAST_CHECK */
+				| cv::CALIB_CB_NORMALIZE_IMAGE | cv::CALIB_CB_FILTER_QUADS);
 			return std::make_tuple(result, corners);
 		}
 		cv::Mat appendCorners(cv::Mat frame, std::vector<cv::Point2f> corners)
 		{
 			imageSize = frame.size();
-			// Append imagePoints
 			cv::cornerSubPix(frame, corners, cv::Size(11, 11), cv::Size(-1, -1), cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::MAX_ITER, 30, 0.001)); //## TAG
 			cv::drawChessboardCorners(frame, boardSize, corners, true);
 			// cv::bitwise_not(frame, frame);
@@ -380,8 +275,6 @@ namespace KiraCV
 		std::tuple<bool, cv::Mat, cv::Mat, cv::Mat, cv::Mat, double, ImagePoints, ObjectPoints> calculate()
 		{
 			cv::Mat cameraMatrix, distCoeffs, rvecs, tvecs;
-
-			// Extend objectPoints
 			std::vector<cv::Point3f> obj;
 			for (int k = 0; k < boardSize.height; k++) {
 				for (int l = 0; l < boardSize.width; l++) {
@@ -390,7 +283,7 @@ namespace KiraCV
 				}
 			}
 			objectPoints.push_back(obj);
-			objectPoints.resize(imagePoints.size(),objectPoints[0]);
+			objectPoints.resize(imagePoints.size(), objectPoints[0]);
 			double rms = cv::calibrateCamera(objectPoints, imagePoints, imageSize, cameraMatrix, distCoeffs, rvecs, tvecs);
 			bool result = cv::checkRange(cameraMatrix) && cv::checkRange(distCoeffs);
 			return std::make_tuple(result, cameraMatrix, distCoeffs, rvecs, tvecs, rms, imagePoints, objectPoints);
@@ -401,7 +294,6 @@ namespace KiraCV
 		cv::Size imageSize;
 		ImagePoints imagePoints;
 		ObjectPoints objectPoints;
-
 	};
 
 	// Interative stereo calibration
@@ -419,7 +311,7 @@ namespace KiraCV
 		~InteractiveCameraCalibration()
 		{
 			cv::destroyAllWindows();
-			if(capture.isOpened())
+			if (capture.isOpened())
 			{
 				capture.release();
 			}
@@ -429,29 +321,33 @@ namespace KiraCV
 			auto captureTime = 0;
 			auto badCaptureTime = 0;
 			std::cout << HIGHLIGHT "Starting camera video capture.\n";
-
 			// MSFS Option
-			#ifdef DISABLE_MSMF
-			std::cout << HIGHLIGHT "Open the camera while disabling Microsoft Media Foundation.\n" CLRST;
-			auto res = _putenv("OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS=0");
-			#endif
+#ifdef DISABLE_MSMF
+			if (setting["Toggle_MSMF"].as_bool()) {
+				std::cout << HIGHLIGHT "Open the camera while disabling Microsoft Media Foundation.\n" CLRST;
+				auto res = _putenv("OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS=0");
+			}
+			else
+			{
+				std::cout << HIGHLIGHT "Open the camera by Microsoft Media Foundation.\n" CLRST;
+			}
+#endif
 
-			
 			capture.open(cameraDeviceNo);
 			// Camera trim
-			capture.set(cv::CAP_PROP_FRAME_WIDTH, setting["CameraResolutionWidth"].as_int64());
-			capture.set(cv::CAP_PROP_FRAME_HEIGHT, setting["CameraResolutionHeight"].as_int64());
-			capture.set(cv::CAP_PROP_FPS, setting["FPS"].as_int64());
+			capture.set(cv::CAP_PROP_FRAME_WIDTH, static_cast<int>(setting["CameraResolutionWidth"].as_int64()));
+			capture.set(cv::CAP_PROP_FRAME_HEIGHT, static_cast<int>(setting["CameraResolutionHeight"].as_int64()));
+			capture.set(cv::CAP_PROP_FPS, static_cast<int>(setting["FPS"].as_int64()));
 			capture.set(cv::CAP_PROP_FOURCC, cv::CAP_OPENCV_MJPEG);
-			// Windows trim
+			// Window trim
 			cv::namedWindow("left", cv::WINDOW_GUI_EXPANDED);
 			cv::namedWindow("right", cv::WINDOW_GUI_EXPANDED);
-			cv::resizeWindow("left", setting["WinSizeWidth"].as_int64(), setting["WinSizeHeight"].as_int64());
-			cv::resizeWindow("right", setting["WinSizeWidth"].as_int64(), setting["WinSizeHeight"].as_int64());
+			cv::resizeWindow("left", static_cast<int>(setting["WinSizeWidth"].as_int64()), static_cast<int>(setting["WinSizeHeight"].as_int64()));
+			cv::resizeWindow("right", static_cast<int>(setting["WinSizeWidth"].as_int64()), static_cast<int>(setting["WinSizeHeight"].as_int64()));
 			cv::namedWindow("left_valid", cv::WINDOW_NORMAL);
 			cv::namedWindow("right_valid", cv::WINDOW_NORMAL);
-			cv::resizeWindow("left_valid", setting["WinSizeWidth"].as_int64(), setting["WinSizeHeight"].as_int64());
-			cv::resizeWindow("right_valid", setting["WinSizeWidth"].as_int64(), setting["WinSizeHeight"].as_int64());
+			cv::resizeWindow("left_valid", static_cast<int>(setting["WinSizeWidth"].as_int64()), static_cast<int>(setting["WinSizeHeight"].as_int64()));
+			cv::resizeWindow("right_valid", static_cast<int>(setting["WinSizeWidth"].as_int64()), static_cast<int>(setting["WinSizeHeight"].as_int64()));
 
 			CameraCalibration leftCali(boardSize.height, boardSize.width, squareSize);
 			CameraCalibration rightCali(boardSize.height, boardSize.width, squareSize);
@@ -479,7 +375,6 @@ namespace KiraCV
 				cv::Mat leftGray, rightGray;
 				cv::cvtColor(leftImage, leftGray, cv::COLOR_BGR2GRAY);
 				cv::cvtColor(rightImage, rightGray, cv::COLOR_BGR2GRAY);
-
 				if (useBinaryThreshold) {
 					cv::threshold(leftGray, leftGray, 127, 255, cv::THRESH_BINARY);
 					cv::threshold(rightGray, rightGray, 127, 255, cv::THRESH_BINARY);
@@ -488,9 +383,8 @@ namespace KiraCV
 				cv::imshow("right", rightGray);
 				auto res = cv::waitKey(1);
 				if (res == 'C' || res == 'c') {		// Capture
-					// Try to find corners
-					auto resultLeft = leftCali.findChessBoard(leftGray);
-					auto resultRight = rightCali.findChessBoard(rightGray);
+					auto resultLeft = leftCali.findCorners(leftGray);
+					auto resultRight = rightCali.findCorners(rightGray);
 					if (std::get<0>(resultLeft) && std::get<0>(resultRight))
 					{
 						std::cout << HIGHLIGHT "Valid frame captured! Captured [ " << ++captureTime << " ]\n" CLRST;
@@ -498,7 +392,6 @@ namespace KiraCV
 						auto resImageRight = rightCali.appendCorners(rightGray, std::get<1>(resultRight));
 						cv::imshow("left_valid", resImageLeft);
 						cv::imshow("right_valid", resImageRight);
-						// Important to update the window
 						cv::waitKey(1);
 					}
 					else
@@ -511,7 +404,6 @@ namespace KiraCV
 						cv::imshow("right_valid", rightGray);
 						cv::waitKey(1);
 					}
-
 				}
 				else if (res == 'Q' || res == 'q')		// Quit
 				{
@@ -519,14 +411,13 @@ namespace KiraCV
 					capture.release();
 					return false;
 				}
-				else if (res == 'E' || res == 'e')		// Execute
+				else if (res == 'E' || res == 'e')		// Execute camera calibration
 				{
 					std::chrono::steady_clock::time_point calibStart, leftDone, rightDone, stereoDone;
 					cv::destroyAllWindows();
 					capture.release();
 					std::cout << HIGHLIGHT "Total [" << captureTime << "] pictures captured.\n";
 					std::cout << HIGHLIGHT "Starting calibration, it may take times...\n" CLRST;
-					// Camera calibration
 					std::cout << HIGHLIGHT "Left camera calibration...\n";
 					calibStart = std::chrono::steady_clock::now();
 					auto leftCalcRes = leftCali.calculate();
@@ -536,7 +427,7 @@ namespace KiraCV
 					auto rightCalcRes = rightCali.calculate();
 					rightDone = std::chrono::steady_clock::now();
 					std::cout << HIGHLIGHT "Elapse time: " << std::chrono::duration_cast<std::chrono::seconds>(rightDone - leftDone).count() << "\n" CLRST;
-					
+
 					auto leftImagePoints = std::get<6>(leftCalcRes);
 					auto leftCheckRange = std::get<0>(leftCalcRes);
 					auto leftCameraMatrix = std::get<1>(leftCalcRes);
@@ -544,7 +435,6 @@ namespace KiraCV
 					auto leftRvecs = std::get<3>(leftCalcRes);
 					auto leftTvecs = std::get<4>(leftCalcRes);
 					auto leftRms = std::get<5>(leftCalcRes);
-
 					auto rightImagePoints = std::get<6>(rightCalcRes);
 					auto rightCheckRange = std::get<0>(rightCalcRes);
 					auto rightCameraMatrix = std::get<1>(rightCalcRes);
@@ -560,7 +450,6 @@ namespace KiraCV
 					cameraParam.left.rotationVectors = leftRvecs;
 					cameraParam.left.translationVectors = leftTvecs;
 					cameraParam.left.rms = leftRms;
-
 					cameraParam.right.checkRange = rightCheckRange;
 					cameraParam.right.cameraMatrix = rightCameraMatrix;
 					cameraParam.right.distCoeffs = rightDistCoeffs;
@@ -579,7 +468,6 @@ namespace KiraCV
 					for (int k = 0; k < boardSize.height; k++) {
 						for (int l = 0; l < boardSize.width; l++) {
 							obj.emplace_back(cv::Point3f(l * squareSize, k * squareSize, 0));
-
 						}
 					}
 					objectPoints.push_back(obj);
@@ -617,9 +505,16 @@ namespace KiraCV
 					cameraParam.Q = Q;
 					lastCalibrate = cameraParam;
 
-					// Print Info
 					KiraUtilities::showCalibrateData(cameraParam);
-					std::cout << HIGHLIGHT  "Calibration done.\n" CLRST;
+					std::cout << HIGHLIGHT  "Calibration done with rms " << cameraParam.rms << "(stereo), " << cameraParam.left.rms << "(left), " << cameraParam.right.rms << "(right)." << ".\n" CLRST;
+					if (cameraParam.rms < 1 && cameraParam.left.rms < 1 && cameraParam.right.rms < 1)
+					{
+						std::cout << HIGHLIGHT "RMS check ok\n";
+					}
+					else
+					{
+						std::cout << HIGHLIGHT "RMS is too high, please recalibrate.\n";
+					}
 					return true;
 				}
 			}
@@ -649,20 +544,20 @@ namespace KiraCV
 	class StereoReconstruction
 	{
 	public:
-		StereoReconstruction(const CameraParamStereo& _param,const int& _cameraDeviceNo = 0)
+		StereoReconstruction(const CameraParamStereo& _param, const int& _cameraDeviceNo = 0)
 		{
 			param = _param;
 			cameraDeviceNo = _cameraDeviceNo;
-			numDisparities = setting["StereoBM_NumDisparities"].as_int64();
-			blockSize = setting["StereoBM_BlockSize"].as_int64();
-			uniquenessRatio = setting["StereoBM_UniquenessRatio"].as_int64();
-			preFilterCap = setting["StereoBM_PreFilterCap"].as_int64();
+			numDisparities = static_cast<int>(setting["StereoBM_NumDisparities"].as_int64()) ;
+			blockSize = static_cast<int>(setting["StereoBM_BlockSize"].as_int64());
+			uniquenessRatio = static_cast<int>(setting["StereoBM_UniquenessRatio"].as_int64());
+			preFilterCap = static_cast<int>(setting["StereoBM_PreFilterCap"].as_int64());
 		}
 
 		~StereoReconstruction()
 		{
 			cv::destroyAllWindows();
-			if(capture.isOpened())
+			if (capture.isOpened())
 			{
 				capture.release();
 			}
@@ -671,30 +566,37 @@ namespace KiraCV
 		void InteractiveReconstruction()
 		{
 			// MSFS Option
-			#ifdef DISABLE_MSMF
-			std::cout << HIGHLIGHT "Open the camera while disabling Microsoft Media Foundation.\n" CLRST;
-			auto res = _putenv("OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS=0");
-			#endif
+#ifdef DISABLE_MSMF
+			if (setting["Toggle_MSMF"].as_bool()) {
+				std::cout << HIGHLIGHT "Open the camera while disabling Microsoft Media Foundation.\n" CLRST;
+				auto res = _putenv("OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS=0");
+			}
+			else
+			{
+				std::cout << HIGHLIGHT "Open the camera by Microsoft Media Foundation.\n" CLRST;
+			}
+#endif
 
 			capture.open(cameraDeviceNo);
 			// Camera trim
 			capture.set(cv::CAP_PROP_FRAME_WIDTH, 3840);
 			capture.set(cv::CAP_PROP_FRAME_HEIGHT, 1080);
-			capture.set(cv::CAP_PROP_FPS, setting["FPS"].as_int64());
+			capture.set(cv::CAP_PROP_FPS, static_cast<int>(setting["FPS"].as_int64()));
 			capture.set(cv::CAP_PROP_FOURCC, cv::CAP_OPENCV_MJPEG);
 			cv::namedWindow("left", cv::WINDOW_GUI_NORMAL);
 			cv::namedWindow("right", cv::WINDOW_GUI_EXPANDED);
-			cv::resizeWindow("left", setting["WinSizeWidth"].as_int64(), setting["WinSizeHeight"].as_int64());
-			cv::resizeWindow("right", setting["WinSizeWidth"].as_int64(), setting["WinSizeHeight"].as_int64());
+			cv::resizeWindow("left", static_cast<int>(setting["WinSizeWidth"].as_int64()), static_cast<int>(setting["WinSizeHeight"].as_int64()));
+			cv::resizeWindow("right", static_cast<int>(setting["WinSizeWidth"].as_int64()), static_cast<int>(setting["WinSizeHeight"].as_int64()));
 			cv::namedWindow("disparity", cv::WINDOW_NORMAL);
-			cv::resizeWindow("disparity", setting["WinSizeWidth"].as_int64(), setting["WinSizeHeight"].as_int64());
+			cv::resizeWindow("disparity", static_cast<int>(setting["WinSizeWidth"].as_int64()), static_cast<int>(setting["WinSizeHeight"].as_int64()));
 			cv::namedWindow("param", cv::WINDOW_NORMAL);
-			cv::resizeWindow("param", setting["WinSizeWidth"].as_int64(), setting["WinSizeHeight"].as_int64());
+			cv::resizeWindow("param", static_cast<int>(setting["WinSizeWidth"].as_int64()), static_cast<int>(setting["WinSizeHeight"].as_int64()));
 
 			int badCaptureTime = 0;
 			cv::Mat frame;
+			bool rtBM = setting["Toggle_RT_StereoBM"].as_bool();
 
-			// Create param slide bar
+			// Create param slide bar 
 			// It must be an odd number >=1 . Normally, it should be somewhere in the 3..11 range.
 			cv::createTrackbar("Block Size:\n", "param", &blockSize, 12);
 			// Normally, a value within the 5-15 range is good enough.
@@ -705,6 +607,12 @@ namespace KiraCV
 			cv::createTrackbar("Pre Filter Cap:\n", "param", &numDisparities, 48);
 
 			cv::setMouseCallback("disparity", onClick, &param);
+
+			if (!rtBM)
+			{
+				std::cout << HIGHLIGHT "Non real time mode, press 'C' to capture\n" CLRST;
+			}
+
 			while (true)
 			{
 				auto result = capture.read(frame);
@@ -722,12 +630,12 @@ namespace KiraCV
 				cv::Size combinedImageSize = frame.size();
 				auto leftImage = frame(cv::Rect(0, 0, combinedImageSize.width / 2, combinedImageSize.height));
 				auto rightImage = frame(cv::Rect(combinedImageSize.width / 2, 0, combinedImageSize.width / 2, combinedImageSize.height));
-				cv::Mat leftGray, rightGray,leftRectify, rightRectify;
+				cv::Mat leftGray, rightGray, leftRectify, rightRectify;
 				cv::cvtColor(leftImage, leftGray, cv::COLOR_BGR2GRAY);
 				cv::cvtColor(rightImage, rightGray, cv::COLOR_BGR2GRAY);
 
 				// StereoRectify
-				if(!rectify)
+				if (!rectify)
 				{
 					cv::Size imageSize(combinedImageSize.width / 2, combinedImageSize.height);
 					StereoRectify(imageSize);
@@ -738,11 +646,13 @@ namespace KiraCV
 				cv::imshow("left", leftRectify);
 				cv::imshow("right", rightRectify);
 
-				// SGBM
-				auto ret = StereoMatchBM(leftRectify,rightRectify);
-				cv::imshow("disparity", ret.second);
+				// StereoBM
+				if (rtBM) {
+					auto ret = StereoMatchBM(leftRectify, rightRectify);
+					cv::imshow("disparity", ret.second);
+				}
 				auto key = cv::waitKey(1);
-				if(key == 'q' || key == 'Q')
+				if (key == 'q' || key == 'Q')
 				{
 					capture.release();
 					cv::destroyAllWindows();
@@ -752,9 +662,14 @@ namespace KiraCV
 					setting["StereoBM_PreFilterCap"] = preFilterCap;
 					return;
 				}
+				else if (!rtBM && (key == 'c' || key == 'C'))
+				{
+					auto ret = StereoMatchBM(leftRectify, rightRectify);
+					cv::imshow("disparity", ret.second);
+				}
 			}
 		}
-		std::pair<cv::Mat,cv::Mat> StereoMatchBM(cv::Mat left , cv::Mat right)
+		std::pair<cv::Mat, cv::Mat> StereoMatchBM(cv::Mat left, cv::Mat right)
 		{
 			cv::Mat disp8;
 			auto stereoBM = cv::StereoBM::create(128, 9);
@@ -773,8 +688,9 @@ namespace KiraCV
 			disp.convertTo(disp8, CV_8U, 255 / ((numDisparities * 16 + 16) * 16.));
 			cv::reprojectImageTo3D(disp8, _3dImage, param.Q, true);
 			_3dImage *= 16;
-			return std::make_pair(disp,disp8);
+			return std::make_pair(disp, disp8);
 		}
+
 	private:
 		CameraParamStereo param;
 		int cameraDeviceNo;
@@ -787,16 +703,16 @@ namespace KiraCV
 		bool rectify = false;
 		cv::VideoCapture capture;
 
-		static void onClick(int event, int x, int y, int z,void* userdata) {
-			if(event == cv::EVENT_LBUTTONDOWN)
+		static void onClick(int event, int x, int y, int z, void* userdata) {
+			if (event == cv::EVENT_LBUTTONDOWN)
 			{
-				CameraParamStereo* param = (CameraParamStereo*)userdata;
+				CameraParamStereo* param = static_cast<CameraParamStereo*>(userdata);
 				auto coordinate = _3dImage.at<cv::Vec3f>(cv::Point(x, y));
 				std::cout << HIGHLIGHT "3D point is :" << coordinate << "\n" CLRST;
-				auto dispVal = (disp.at<uint16_t>(y, x))/16;
+				auto dispVal = (disp.at<uint16_t>(y, x)) / 16;
 				auto baseline = cv::norm(param->translationVector) / 1000;
 				auto focal_length = param->cameraMatrixLeft.at<double>(0, 0);
-				double depth = (baseline * focal_length) / (dispVal);
+				auto depth = (baseline * focal_length) / (dispVal);
 				depth = depth * 100;
 				std::cout << HIGHLIGHT "Real distance is: " << depth << "cm\n" CLRST;
 			}
@@ -805,10 +721,10 @@ namespace KiraCV
 		void StereoRectify(const cv::Size& imageSize)
 		{
 			cv::Mat R1, R2, P1, P2, Q;
+			// cv::stereoRectify(alpha: -1:Auto, 0:No black area, 1:Full picture )
 			cv::stereoRectify(param.cameraMatrixLeft, param.distCoeffsLeft, param.cameraMatrixRight, param.distCoeffsRight,
 				imageSize, param.rotationMatrix, param.translationVector, R1, R2, P1, P2, Q, cv::CALIB_ZERO_DISPARITY,
 				1, imageSize, &ROI1, &ROI2);
-			// cv::stereoRectify(alpha: -1:Auto, 0:No black area,1:Full picture )
 			initUndistortRectifyMap(param.cameraMatrixLeft, param.distCoeffsLeft, R1, P1, imageSize, CV_16SC2, mapLx, mapLy);
 			initUndistortRectifyMap(param.cameraMatrixRight, param.distCoeffsRight, R2, P2, imageSize, CV_16SC2, mapRx, mapRy);
 		}
@@ -818,10 +734,10 @@ namespace KiraCV
 int main()
 {
 	std::cout << HIGHLIGHT "Kira OpenCV Stereo Tools\n" CLRST;
-	// Load settings
+	// Load & init settings
 	std::string settingFileName = "settings.json";
 	std::ifstream check(settingFileName);
-	if(check.good())
+	if (check.good())
 	{
 		check.close();
 	}
@@ -911,7 +827,7 @@ Enter the number: )delemeter" CLRST;
 			{
 				squareSize = 28.5f;
 			}
-			KiraCV::InteractiveCameraCalibration acc(boardSize.height, boardSize.width, squareSize, KiraCV::setting["CameraDeviceNumber"].as_int64(), KiraCV::setting["UseBinaryThreshold"].as_bool());
+			KiraCV::InteractiveCameraCalibration acc(boardSize.height, boardSize.width, squareSize, static_cast<int>(KiraCV::setting["CameraDeviceNumber"].as_int64()), KiraCV::setting["UseBinaryThreshold"].as_bool());
 			KiraCV::CameraParamStereo cameraParamStereo;
 			acc.startCalibration(cameraParamStereo);
 			acc.saveCalibrationResult();
@@ -921,7 +837,7 @@ Enter the number: )delemeter" CLRST;
 		{
 			std::cout << "Booting...\n";
 			KiraCV::CameraParamStereo param = KiraCV::KiraUtilities::readCalibrateData("calibration_data.yaml").second;
-			KiraCV::StereoReconstruction srs(param, KiraCV::setting["CameraDeviceNumber"].as_int64());
+			KiraCV::StereoReconstruction srs(param, static_cast<int>(KiraCV::setting["CameraDeviceNumber"].as_int64()));
 			srs.InteractiveReconstruction();
 		}
 		break;
@@ -934,8 +850,8 @@ Enter the number: )delemeter" CLRST;
 		{
 			KiraCV::KiraUtilities::saveSettings(KiraCV::setting, settingFileName);
 			return 0;
-			break;
 		}
+		break;
 		case 6:
 		{
 			std::cout << HIGHLIGHT "Discard changes? (No)" CLRST;
@@ -947,11 +863,8 @@ Enter the number: )delemeter" CLRST;
 			{
 				return 0;
 			}
-			else
-			{
-				continue;
-			}
 		}
+		break;
 		default:
 		{
 			std::cout << HIGHLIGHT "Invalid Input\n" CLRST;
