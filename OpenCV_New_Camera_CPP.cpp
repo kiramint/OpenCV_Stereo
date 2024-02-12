@@ -643,6 +643,9 @@ namespace KiraCV
 		bool useBinaryThreshold;
 		cv::VideoCapture capture;
 	};
+
+	cv::Mat disp, _3dImage;
+
 	class StereoReconstruction
 	{
 	public:
@@ -701,6 +704,7 @@ namespace KiraCV
 			// Gray sensitivity reduction. 5~15 (Condition good, bright) to 20~63(Noisy, dim)
 			cv::createTrackbar("Pre Filter Cap:\n", "param", &numDisparities, 48);
 
+			cv::setMouseCallback("disparity", onClick, &param);
 			while (true)
 			{
 				auto result = capture.read(frame);
@@ -752,7 +756,7 @@ namespace KiraCV
 		}
 		std::pair<cv::Mat,cv::Mat> StereoMatchBM(cv::Mat left , cv::Mat right)
 		{
-			cv::Mat disp, disp8;
+			cv::Mat disp8;
 			auto stereoBM = cv::StereoBM::create(128, 9);
 			stereoBM->setMinDisparity(0);
 			stereoBM->setNumDisparities(numDisparities * 16 + 16);
@@ -779,9 +783,24 @@ namespace KiraCV
 		int uniquenessRatio = 3;
 		int preFilterCap = 16;
 		cv::Rect ROI1, ROI2;
-		cv::Mat mapLx, mapLy, mapRx, mapRy,_3dImage;
+		cv::Mat mapLx, mapLy, mapRx, mapRy;
 		bool rectify = false;
 		cv::VideoCapture capture;
+
+		static void onClick(int event, int x, int y, int z,void* userdata) {
+			if(event == cv::EVENT_LBUTTONDOWN)
+			{
+				CameraParamStereo* param = (CameraParamStereo*)userdata;
+				auto coordinate = _3dImage.at<cv::Vec3f>(cv::Point(x, y));
+				std::cout << HIGHLIGHT "3D point is :" << coordinate << "\n" CLRST;
+				auto dispVal = (disp.at<uint16_t>(y, x))/16;
+				auto baseline = cv::norm(param->translationVector) / 1000;
+				auto focal_length = param->cameraMatrixLeft.at<double>(0, 0);
+				double depth = (baseline * focal_length) / (dispVal);
+				depth = depth * 100;
+				std::cout << HIGHLIGHT "Real distance is: " << depth << "cm\n" CLRST;
+			}
+		}
 
 		void StereoRectify(const cv::Size& imageSize)
 		{
